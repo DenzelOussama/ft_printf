@@ -1,0 +1,598 @@
+You only need to know how va_arg finds your arguments on x86-64 (System V AMD64 ABI) and why standard ft_printf avoids vector registers altogether.
+
+1. Why ft_printf Skips Vector Registers
+
+• Standard ft_printf specifiers (%c, %s, %p, %d, %i, %u, %x, %X, %%) only take integers, characters, and pointers.
+• All of these pass exclusively through General Purpose Registers (GPRs) (rdi, rsi, rdx, rcx, r8, r9) and the stack.
+• Unless you implement %f (which is not required in standard 42 ft_printf), vector registers (xmm0–xmm7) are completely untouched.
+
+2. The Only Thing That Affects Your Code (va_list)
+
+Under the hood, va_list on Linux/macOS (x86-64) tracks two separate register save areas in memory:
+• gp_offset: Tracks how many bytes of GPR arguments have been read so far (steps by 8 bytes, up to 48 bytes for 6 registers).
+• fp_offset: Tracks floating-point/vector (xmm) arguments (starts at 48, steps by 16 bytes).
+Because you never call va_arg(args, double), fp_offset is never incremented, and you only ever pull from the GPR save area or the stack overflow area.
+
+3. Two Practical Rules to Remember
+
+• Default Argument Promotions: Types smaller than int (like char for %c) are automatically promoted to int when passed to a variadic function. Always call va_arg(args, int) for %c, never va_arg(args, char).
+• Exact Type Matching: Always match the va_arg type to the specifier (int for %d/%i, unsigned int for %u/%x/%X, void * or uintptr_t for %p, char * for %s) so va_arg reads the right byte width from the GPRs/stack.
+If you run into any bugs with your ft_printf, share the specifier you're implementing or your current va_arg snippet, and I can help you debug it.
+
+QUESTIONS:
+
+what is va_list, why is it a typedef, why didnt they just use a struct instead of va_list[1]
+if the arguments given before the ... is more than six, the first six ones are stored in the registers, what about the others
+where are vector registers are they next to gprs or after them
+gp_offset moves only in the 6 registers, after these 6 it sill moves with gp_offset or somehting else
+do we give it the gp_offset or its already declared
+why the Promotion happens to int
+
+ANSWER:
+
+Here is how va_list and variadic arguments work under the hood on x86-64 (System V ABI) without getting bogged down in unnecessary assembly.
+
+1. Why is va_list a 1-element array (struct __va_list_tag[1])?
+
+• Pass-by-reference trick: In C, when you pass an array to a function (like passing ap to a helper function handle_specifier(ap)), it automatically decays into a pointer to its first element.
+• Shared state: Because it passes as a pointer, any va_arg(ap, ...) call inside your helper function modifies the exact same gp_offset in the caller. If va_list were a normal struct, passing it by value would copy it, and your helper functions wouldn't advance the argument position for the rest of ft_printf.
+
+2. More than 6 arguments before ... (or more than 6 total)
+
+• Registers first, stack second: The first 6 integer/pointer arguments (counting all arguments, including const char *format) go into the 6 GPRs (rdi, rsi, rdx, rcx, r8, r9).
+• The rest go on the stack: Every integer/pointer argument from the 7th onward is pushed onto the caller's stack (called the overflow arg area) right before the function call.
+
+3. Where are the vector registers (xmm0–xmm7)?
+
+• Separate hardware, adjacent in memory: Inside the CPU, xmm0–xmm7 are completely separate hardware registers from the GPRs.
+• Inside va_start: When your variadic function starts, the compiler dumps all 6 GPRs and all 8 xmm registers into a hidden buffer on your stack called the Register Save Area. In that buffer, the xmm registers sit immediately after the 6 GPRs (starting at byte offset 48).
+
+4. What happens after the 6 GPRs? Does gp_offset keep moving?
+
+• No, it switches pointers: gp_offset only tracks the 6 GPRs (0 to 40, stepping by 8).
+• The overflow_arg_area pointer: Once gp_offset hits 48 (meaning all 6 GPRs are used up), va_arg stops using gp_offset and starts reading directly from a separate pointer inside the struct called overflow_arg_area, advancing that pointer by 8 bytes per argument along the stack.
+
+5. Do we set gp_offset, or is it automatic?
+
+• Completely automatic: You never touch gp_offset directly. When you call the va_start(ap, format) macro, the compiler automatically calculates how many GPRs were already used by your fixed parameters (for ft_printf(const char *format, ...), format uses rdi, so the compiler initializes gp_offset to 8).
+
+6. Why does promotion to int happen?
+
+• Historical C & CPU efficiency: In early C (K&R C), function prototypes didn't exist, so the compiler didn't know what types a function expected; promoting everything smaller than int (char, short) to a standard word size (int) ensured consistent stack alignment.
+• Register width: On modern 64-bit CPUs, every GPR slot in the save area and every slot on the stack is 8 bytes (64 bits) wide anyway—passing a 1-byte char takes the exact same register/stack slot as a 4-byte int.
+Are you splitting your ft_printf specifiers into separate helper functions (which is where the array-decay behavior of va_list matters most), or keeping the va_arg calls inside a single loop?
+
+QUESTIONS:
+
+i keep seeing these areas, whats save area overflow area...and when you said right before the function call, can you demonstrait the order of all these in the stack 
+so basiclly gprs and Vector registers in hardware are completlly seperate specs/slots not close to each other but when the copying happens to the stack the vecotre registers set exactlly after the 6 gprs in the register save area
+
+you said :gp_offset only tracks the 6 GPRs (0 to 40, stepping by 8) so basiclly 0-7 8-15 16-23 24-31 32-39 40-47 then va_arg start using overflow_arg_area till what, gp_offset limits 48, this one limits at what
+
+gp_offset is 0 when u call va_start it get initializesto 8 since the string format takes rdi aka got moves by 8
+
+
+ANSWER:
+
+You nailed almost every single detail. Here is the exact mental model of how those pieces fit together in memory on x86-64.
+
+1. Your Three Confirmations
+
+• Hardware vs. Register Save Area: Spot on. Inside the silicon of the CPU, GPRs and XMM registers are separate physical circuits. When your variadic function starts, the compiler reserves a block on ft_printf's stack frame and copies them right next to each other: bytes 0–47 hold the 6 GPRs, and bytes 48–175 hold the 8 XMM registers (8 × 16 bytes = 128 bytes).
+• gp_offset initialization: Exactly right. Because const char *format is the 1st argument, the caller puts it in rdi (bytes 0–7). When va_start(ap, format) runs, the compiler sees 1 GPR was used and sets gp_offset = 8, so your very first va_arg reads rsi (bytes 8–15).
+• Does overflow_arg_area have a limit? No. Unlike gp_offset (which hits a hard wall at 48), overflow_arg_area is just a raw memory pointer (void *) that keeps advancing by 8 bytes every time you call va_arg. It trusts your format string completely—if you put twenty %d specifiers in your string, it will blindly read 15 times from the stack, even if the caller didn't pass that many arguments (which is why mismatched format strings cause undefined behavior or segfaults).
+
+2. Stack Layout: Save Area vs. Overflow Area
+
+HIGH MEMORY ADDRESSES
+┌──────────────────────────────────────────────┐
+│  main's Stack Frame                          │
+│  ┌────────────────────────────────────────┐  │
+│  │ Arg 8: 7          (8 bytes)            │  │
+│  ├────────────────────────────────────────┤  │
+│  │ Arg 7: 6          (8 bytes)  <─────────┼──┼── overflow_arg_area points here!
+│  └────────────────────────────────────────┘  │
+├──────────────────────────────────────────────┤
+│  Return Address (where ft_printf returns to) │
+├──────────────────────────────────────────────┤
+│  ft_printf's Stack Frame                     │
+│  ┌────────────────────────────────────────┐  │
+│  │ Saved RBP & local variables            │  │
+│  ├────────────────────────────────────────┤  │
+│  │ [Register Save Area]  <────────────────┼──┼── reg_save_area points here!
+│  │   bytes 48..175 : xmm0 - xmm7 (128B)   │  │
+│  │   bytes 40..47  : r9  (Arg 6: 5)       │  │
+│  │   bytes 32..39  : r8  (Arg 5: 4)       │  │
+│  │   bytes 24..31  : rcx (Arg 4: 3)       │  │
+│  │   bytes 16..23  : rdx (Arg 3: 2)       │  │
+│  │   bytes 08..15  : rsi (Arg 2: 1)  <────┼──┼── reg_save_area + gp_offset (8)
+│  │   bytes 00..07  : rdi (Arg 1: format)  │  │
+│  └────────────────────────────────────────┘  │
+└──────────────────────────────────────────────┘
+LOW MEMORY ADDRESSES
+
+Suppose main calls ft_printf("%d %d %d %d %d %d %d", 1, 2, 3, 4, 5, 6, 7).
+That is 8 total arguments (format + 7 integers):
+• Args 1–6 (format, 1, 2, 3, 4, 5) go into CPU registers (rdi, rsi, rdx, rcx, r8, r9).
+• Args 7–8 (6, 7) won't fit in registers, so right before executing call ft_printf, main pushes them onto its own stack frame.
+Once ft_printf starts and runs va_start, the stack looks like this (growing downward from high addresses to low addresses):
+Show Code
+Download diagram SVG
+
+How va_arg Walks Through This
+
+1. Calls 1 to 5 (1 through 5): gp_offset is < 48, so va_arg reads reg_save_area + gp_offset and adds 8 to gp_offset.
+2. Call 6 (6): gp_offset is now 48 (>= 48), so va_arg switches to overflow_arg_area, reads 6, and moves overflow_arg_area up by 8 bytes.
+3. Call 7 (7): va_arg reads 7 from the updated overflow_arg_area and advances it by another 8 bytes.
+Everything about va_list is now crystal clear—would you like to move on to structuring your ft_printf code (such as clean ways to dispatch format specifiers or handle return-value character counting)?
+
+
+
+Use void * inside va_arg, then cast it to unsigned long (or uintptr_t)—it is strictly safer according to the C standard, even though your current code works on x86-64 Linux/macOS.
+
+Why void * in va_arg is Better Practice
+
+• C Standard Compliance: Under the C standard, calling va_arg(ap, type) with a type that isn't compatible with the actual passed argument (void *) is technically undefined behavior.
+• Hardware / ABI Safety: On x86-64 Linux/macOS, void * and unsigned long are both 8 bytes and pass through the exact same GPRs, so your code works in practice. However, on some architectures (like Windows 64-bit, where unsigned long is only 4 bytes while void * is 8 bytes, or specialized architectures with separate address/data registers), reading a void * as an unsigned long will corrupt or truncate the address.
+
+Cleanest Way to Write It
+
+You can keep your ft_print_pointer function signature almost identical—just extract the pointer as void * first and cast it when passing it in:
+c
+else if (c == 'p')
+    ft_print_pointer((unsigned long)va_arg(inputs, void *), count);
+Use code with caution.
+(Note: uintptr_t from <stdint.h> is the textbook C type specifically designed to hold a pointer as an unsigned integer, though unsigned long is standard in 42 projects when <stdint.h> isn't used.)
+
+Quick Reminder for %p Edge Cases
+
+• Null pointer (NULL / 0): Make sure you check what your specific OS's printf("%p", NULL) outputs—on Linux (glibc), printf("%p", NULL) prints (nil), whereas on macOS it prints 0x0.
+Are you compiling and testing your ft_printf on Linux (glibc) or macOS, and do you already have your NULL check in ft_print_pointer?
+
+
+recap :
+Here is the complete, final recap ready for your notes—covering the exact hardware, ABI, type promotions, and execution flow from calling ft_printf() to seeing characters on your terminal (x86-64 System V ABI: Linux & macOS).
+
+1. Before Calling ft_printf (Caller Side, e.g., main)
+
+Suppose main calls:
+c
+ft_printf("%c %d %u %x %s %p %d", 'A', -42, 42, 255, "hi", ptr, 99);
+Use code with caution.
+1. Default Argument Promotions:
+	• Types smaller than int (char, short) are promoted to 4-byte int.
+	• float (if used) is promoted to 8-byte double.
+	• Types 32 bits or larger (int, unsigned int, char *, void *) keep their exact type and size—nothing is ever shrunk.
+2. Loading the 6 General Purpose Registers (First 6 Integer/Pointer Args):
+	• Every GPR is 8 bytes (64 bits) wide.
+	• Arg 1 (format string address) → rdi
+	• Arg 2 ('A' promoted to int) → rsi
+	• Arg 3 (-42 as int) → rdx
+	• Arg 4 (42 as unsigned int) → rcx
+	• Arg 5 (255 as unsigned int) → r8
+	• Arg 6 ("hi" as char *) → r9
+3. Pushing Extra Arguments to the Stack (7th+ Args):
+	• Any integer/pointer argument beyond the first 6 (ptr and 99) won't fit in the GPRs.
+	• Right before calling ft_printf, main pushes them onto its own stack frame in 8-byte slots. This region becomes the Overflow Area.
+4. Setting al & Calling:
+	• main sets al = 0 (the lowest 8 bits of rax) to signal that 0 vector registers (xmm0–xmm7) hold floating-point arguments.
+	• call ft_printf pushes the return address onto the stack and jumps into ft_printf.
+
+2. Entering ft_printf & Running va_start
+
+Inside ft_printf(const char *format, ...):
+1. Creating the Register Save Area:
+	• Inside the CPU silicon, GPRs and vector registers (xmm0–xmm7) are completely separate hardware.
+	• When ft_printf starts, it allocates a contiguous buffer on its own stack frame called the Register Save Area:
+		• Bytes 0–47: Copies all 6 GPRs (rdi, rsi, rdx, rcx, r8, r9) at 8 bytes each.
+		• Bytes 48–175: Reserved for xmm0–xmm7 (16 bytes each), sitting immediately after the GPRs—but skipped because al == 0.
+2. Initializing va_list:
+	• va_list is a 1-element array of struct __va_list_tag. Because arrays decay into pointers when passed to functions, passing ap to helper functions shares and mutates the exact same state.
+	• va_start(ap, format) initializes the 4 fields automatically:
+		• gp_offset = 8: format already took rdi (bytes 0–7), so variadic reading starts at rsi (byte 8).
+		• fp_offset = 48: Starting offset for vector registers (never used in standard ft_printf).
+		• reg_save_area: Points to byte 0 of the Register Save Area.
+		• overflow_arg_area: Points to Arg 7 (ptr) in main's stack frame, right above the return address.
+
+3. Memory Layout on the Stack
+
+Show Code
+Download diagram SVG
+
+4. Extracting Arguments with va_arg
+
+As your loop scans format and hits %:
+1. How va_arg Moves Through Memory:
+	• While gp_offset < 48 (Args 2–6): Reads 8 bytes from reg_save_area + gp_offset, then adds 8 to gp_offset (8 -> 16 -> 24 -> 32 -> 40 -> 48).
+	• Once gp_offset == 48 (Args 7+): Switches permanently to overflow_arg_area, reads 8 bytes from main's stack, and advances overflow_arg_area by 8 bytes. It has no upper limit—it blindly trusts your format string.
+2. Exact Type Table (Best Practice):
+
+Specifier	Passed Type	va_arg Extraction (Safe & Standard)	Bytes Read from 8-Byte Slot
+%c	char	(unsigned char)va_arg(ap, int)	Lower 4 bytes (cast to 1 byte)
+%d / %i	int	va_arg(ap, int)	Lower 4 bytes (upper 4 ignored)
+%u	unsigned int	va_arg(ap, unsigned int)	Lower 4 bytes (upper 4 ignored)
+%x / %X	unsigned int	va_arg(ap, unsigned int)	Lower 4 bytes (upper 4 ignored)
+%s	char *	va_arg(ap, char *)	All 8 bytes
+%p	void *	(unsigned long)va_arg(ap, void *)	All 8 bytes
+%%	(none)	(No va_arg call)	(none)
+
+
+5. Formatting, Syscall & Terminal Output
+
+1. Formatting: Your helper functions convert numbers/pointers into ASCII characters (handling edge cases like INT_MIN, NULL strings as "(null)", and NULL pointers as "(nil)" on Linux or "0x0" on macOS).
+2. Syscall (write): Calling write(1, ...) triggers a transition from User Mode to Kernel Mode, sending the raw bytes to file descriptor 1 (stdout).
+3. Terminal Rendering: The OS kernel forwards those bytes through the pseudo-terminal (pty) driver to your terminal emulator, which draws the characters on screen.
+4. Return: va_end(ap) cleans up (a no-op on modern x86-64 compilers), ft_printf puts the total printed character count into rax, and ret returns control to main.
+Everything is ready for your notes—if you want to review anything else before you start coding, such as Makefile setup, Norminette rules, or edge-case testing, just let me know!
+
+---------------------------recap & QUESTIONS/ANSWERS end here---------------------------
+peer visualisation:
+
+HIGH ADDRESSES
+	
+test2("zakariae", "1", "2", "3", "4", "5", "6", "7", "8");
+
+┌──────────────────────────────────────────────────────────────┐
+│ main's locals                                                │
+├──────────────────────────────────────────────────────────────┤
+│ 0x7ffe1048   0x55555555601e ──► "8"      (3rd stack arg)     │
+│ 0x7ffe1040   0x55555555601c ──► "7"      (2nd stack arg)     │
+│ 0x7ffe1038   0x55555555601a ──► "6"      (1st stack arg)     │ ◄── overflow_arg_area
+├──────────────────────────────────────────────────────────────┤
+│ 0x7ffe1030   return address (to main)                        │
+│ 0x7ffe1028   saved rbp                                       │ ◄── rbp
+╞═══════════════ test2's frame starts here ════════════════════╡
+│ ap (va_list, 24 bytes)                                       │
+│     gp_offset         = 8                                    │
+│     fp_offset         = 48                                   │
+│     overflow_arg_area = 0x7ffe1038   (points UP to "6" slot) │
+│     reg_save_area     = 0x7ffe0f40   (points DOWN to +0)     │
+├──────────────────────────────────────────────────────────────┤
+│ local copy of c = 0x555555556043 ──► "zakariae"              │
+│ (a normal local, NOT in the register save area)              │
+├──────────────────────────────────────────────────────────────┤
+│ REGISTER SAVE AREA (176 bytes)                               │
+│   +160 … +48   xmm7 … xmm0                                   │
+│   +40  0x7ffe0f68   0x555555556018 ──► "5"     (from r9)     │
+│   +32  0x7ffe0f60   0x555555556016 ──► "4"     (from r8)     │
+│   +24  0x7ffe0f58   0x555555556014 ──► "3"     (from rcx)    │
+│   +16  0x7ffe0f50   0x555555556012 ──► "2"     (from rdx)    │
+│   +8   0x7ffe0f48   0x555555556010 ──► "1"     (from rsi)    │ ◄── gp_offset = 8 * named int parameters
+│   +0   0x7ffe0f40   (rdi slot, unused)                       │ ◄── reg_save_area
+└──────────────────────────────────────────────────────────────┘
+
+reg_save_area + gp_offset
+gp_offset += 8;
+
+LOW ADDRESSES  (rsp)
+
+#define yes 5*5*5
+
+int main()
+{
+    test2("zakariae", "1", "2", "3", "4", "5", "6", "7", "8");
+
+    printf("%d",87);   
+}
+
+
+
+HIGH ADDRESSES
+┌────────────────────────────────────────────────────────────────────┐
+│ KERNEL SPACE  (0xffff8000... and up)  not accessible to your code  │
+╞════════════════════════════════════════════════════════════════════╡
+│ STACK  (0x7ffe....)                          grows DOWN ↓          │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ env strings, argv strings, auxv, envp[], argv[], argc        │  │
+│  ├──────────────────────────────────────────────────────────────┤  │
+│  │ __libc_start_main frames (calls main)                        │  │
+│  ├──────────────────────────────────────────────────────────────┤  │
+│  │ main's frame                                                 │  │
+│  │ 0x7ffe1048  0x55555555601e <-> "8"   (3rd stack arg)         │  │
+│  │ 0x7ffe1040  0x55555555601c ──► "7"   (2nd stack arg)         │  │
+│  │ 0x7ffe1038  0x55555555601a ──► "6"   (1st stack arg)  ◄──┐   │  │
+│  ├──────────────────────────────────────────────────────────┼───┤  │
+│  │ 0x7ffe1030  return address (back to main)                │   │  │
+│  │ 0x7ffe1028  saved rbp                                    │   │  │
+│  ├──────────────── test2's frame ───────────────────────────┼───┤  │
+│  │ ap (va_list, 24 bytes)                                   │   │  │
+│  │   gp_offset = 8 → 16 → ... → 48                          │   │  │
+│  │   fp_offset = 48                                         │   │  │
+│  │   overflow_arg_area = 0x7ffe1038 ────────────────────────┘   │  │
+│  │   reg_save_area     = 0x7ffe0f40 ──────────────────┐         │  │
+│  │ i = 0..8                                           │         │  │
+│  │ res (char *)                                       │         │  │
+│  │ c   = 0x555555556043 ──► "zakariae" (in .rodata)   │         │  │
+│  ├────────────────────────────────────────────────────┼─────────┤  │
+│  │ REGISTER SAVE AREA (176 bytes)                     │         │  │
+│  │ +160..+48  xmm7..xmm0                              │         │  │
+│  │ +40  0x7ffe0f68  → "5"  (r9)                       │         │  │
+│  │ +32  0x7ffe0f60  → "4"  (r8)                       │         │  │
+│  │ +24  0x7ffe0f58  → "3"  (rcx)                      │         │  │
+│  │ +16  0x7ffe0f50  → "2"  (rdx)                      │         │  │
+│  │ +8   0x7ffe0f48  → "1"  (rsi)   ◄ gp_offset starts │         │  │
+│  │ +0   0x7ffe0f40  (rdi slot, unused) ◄──────────────┘         │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  printf's own frames get pushed below this when called             │
+│                              ↓ (rsp)                               │
+│                                                                    │
+│              ... large unused gap (stack can grow) ...             │
+╞════════════════════════════════════════════════════════════════════╡
+│ MEMORY-MAPPED REGION  (0x7fxx.... shared libraries)                │
+│   ld-linux-x86-64.so  (dynamic loader)                             │
+│   libc.so.6           (printf lives here: code + its own data)     │
+│   [vdso], [vvar]                                                   │
+│   (also where big malloc calls and mmap go)                        │
+╞════════════════════════════════════════════════════════════════════╡
+│              ... large unused gap (heap can grow) ...              │
+│                              ↑                                     │
+│ HEAP  (0x5555.... after .bss)                grows UP ↑            │
+│   your code never calls malloc, but printf does it for you:        │
+│   glibc allocates the stdout buffer (about 1024 or 4096 bytes)     │
+│   on the first printf                                              │
+╞════════════════════════════════════════════════════════════════════╡
+│ .BSS    uninitialized globals/statics (zeroed)                     │
+│   → EMPTY in your program (no globals)                             │
+├────────────────────────────────────────────────────────────────────┤
+│ .DATA   initialized globals/statics (read/write)                   │
+│   → EMPTY in your program (no globals)                             │
+├────────────────────────────────────────────────────────────────────┤
+│ .RODATA  read-only data (string literals)                          │
+│   0x555555556010  "1"                                              │
+│   0x555555556012  "2"                                              │
+│   0x555555556014  "3"                                              │
+│   0x555555556016  "4"                                              │
+│   0x555555556018  "5"                                              │
+│   0x55555555601a  "6"                                              │
+│   0x55555555601c  "7"                                              │
+│   0x55555555601e  "8"                                              │
+│   0x555555556043  "zakariae"                                       │
+│   ......          "res from reg save era : %s\n"                   │
+│   ......          "res from stack : %s\n"                          │
+├────────────────────────────────────────────────────────────────────┤
+│ .TEXT   machine code (read + execute)                              │
+│   0x555555555129  main                                             │
+│   0x555555555171  test2   ← your gdb breakpoint was here           │
+│   (+ _start, PLT stubs for printf, etc.)                           │
+├────────────────────────────────────────────────────────────────────┤
+│ ELF headers                                                        │
+│   0x555555554000  base address of your binary (PIE)                │
+╞════════════════════════════════════════════════════════════════════╡
+│ NULL page (0x0 ... 0xfff)  unmapped, so NULL dereference segfaults │
+└────────────────────────────────────────────────────────────────────┘
+LOW ADDRESSES
+
+
+---------------------------peer visualisation ends here--------------------------
+
+claude markdawn explanation using the example ft_printf("%d %s", 42, "hi"):
+
+# How `ft_printf("%d %s", 42, "hi")` actually works (x86_64 Linux)
+
+Scope: 64-bit Linux, System V ABI (your school machines). Other systems (Mac arm64, Windows) do this differently.
+The structure and numbers below were cross-checked against the System V ABI layout and compiler output.
+
+---
+
+## 0. Words you need
+
+| Word | Meaning |
+|---|---|
+| **CPU register** | A tiny storage slot inside the CPU. Very fast, 8 bytes each, only a handful exist. Not in RAM. |
+| **RAM / memory** | Where your program's data lives. Every byte has an address. |
+| **Stack** | A region of RAM used for function calls. Each function call gets a chunk of it called a **stack frame** (its local variables, return address, etc.). |
+| **Caller / callee** | Caller = `main`, who calls `ft_printf`. Callee = `ft_printf`. |
+| **Value vs address** | `42` is a value. The address of `"hi"` is a number saying *where in RAM* the characters `h`,`i`,`\0` sit. |
+| **Named parameter** | The ones before `...`. For you, only `s`. |
+| **Variadic args** | The ones matched by `...`. |
+
+---
+
+## 1. The call, before it happens (the caller's job)
+
+The compiler knows the prototype of `ft_printf`, so it sets up like this:
+
+```
+rdi = address of the string "%d %s"     (this is the named parameter s)
+rsi = 42                                (1st variadic arg, the VALUE)
+rdx = address of the string "hi"        (2nd variadic arg, an ADDRESS)
+al  = 0                                 (how many float registers are used; none here)
+```
+
+- The six registers used for integer/pointer args, in order: `rdi, rsi, rdx, rcx, r8, r9`.
+- Strings like `"hi"` live in a read-only part of your program's memory. Only their **address** goes in the register. The characters are never copied.
+- If there are more than 6 args, the extra ones are **pushed on the stack by the caller** instead (see section 6).
+
+Then the `call` instruction runs: it pushes the return address on the stack and jumps into `ft_printf`.
+
+---
+
+## 2. First thing inside `ft_printf`: the compiler's hidden prologue
+
+Registers are temporary. The next function call (like `write`) will reuse `rdi`, `rsi`, `rdx` for its own arguments and overwrite them.
+
+So because `ft_printf` has `...`, the compiler adds extra code at the very start of the function (you never write it) that **copies all the argument registers into memory**, inside `ft_printf`'s own stack frame. That block of memory is called the **register save area**.
+
+```
+register save area (in ft_printf's own stack frame)
+
+offset  0 : copy of rdi  ->  address of "%d %s"   (the named param s)
+offset  8 : copy of rsi  ->  42
+offset 16 : copy of rdx  ->  address of "hi"
+offset 24 : copy of rcx  ->  leftover junk, unused
+offset 32 : copy of r8   ->  leftover junk, unused
+offset 40 : copy of r9   ->  leftover junk, unused
+offset 48 .. 176 : copies of the float registers xmm0..xmm7 (16 bytes each)
+```
+
+- It is a **copy**. The originals are still in the registers until something overwrites them.
+- The compiler checks `al` here: if it's 0, it skips copying the float registers, so integer-only programs never touch the float unit.
+
+---
+
+## 3. `va_start(inputs, s)`
+
+`va_start` does **not copy any arguments**. The copying was already done in section 2.
+
+All it does is fill in `inputs`. On this platform `va_list` is a small struct with 4 fields:
+
+```
+gp_offset          = 8      where to read the next integer/pointer in the save area
+fp_offset          = 48     where to read the next float in the save area
+overflow_arg_area  = address of the first stack-passed arg (in the caller's stack)
+reg_save_area      = address of the block from section 2
+```
+
+Why `gp_offset` starts at 8: it starts at `8 * (number of named integer params)`. You have one named param (`s`, in slot 0), so the variadic part starts at slot 1, offset 8.
+
+That's the answer to "does it only look at the `...` part": yes, because `gp_offset` starts after the named ones. The second argument of `va_start` (the last named param) is how the compiler knows how many named ones to skip.
+
+---
+
+## 4. `va_arg` (each call)
+
+`va_arg` is not a normal function. The compiler turns it into a few instructions placed right where you wrote it. The logic is:
+
+```
+if gp_offset < 48:
+    read 8 bytes at (reg_save_area + gp_offset)
+    gp_offset += 8
+else:
+    read 8 bytes at overflow_arg_area
+    overflow_arg_area += 8
+then use as many bytes as the requested type needs
+```
+
+For our call:
+
+```
+va_arg(inputs, int)
+   gp_offset = 8  (< 48)  -> read slot at offset 8 -> 42 -> take the lower 4 bytes as int
+   gp_offset becomes 16
+
+va_arg(inputs, char *)
+   gp_offset = 16 (< 48)  -> read slot at offset 16 -> address of "hi" -> use all 8 bytes as pointer
+   gp_offset becomes 24
+```
+
+Then your code does `write(1, s, 1)` with that pointer and prints `h`, `i`.
+
+---
+
+## 5. Why the type you ask for matters
+
+Each slot is 8 bytes, and `va_arg` just reads the slot as the type you name:
+
+- Ask for `int` -> uses the lower 4 bytes. The ABI doesn't guarantee what's in the other 4 bytes.
+- Ask for `unsigned long` where the caller passed an `int` -> you read all 8 bytes, including those 4 undefined ones.
+- Ask for the wrong kind entirely (like a whole struct instead of a pointer) -> you read the wrong number of bytes and every later `va_arg` is off too.
+
+Also, `char` arguments are promoted to `int` by the caller (C rule for variadic args). That's why `%c` uses `va_arg(inputs, int)`.
+
+---
+
+## 6. More than 6 arguments: the overflow area
+
+Example: `ft_printf(s, a1, a2, a3, a4, a5, a6, a7, a8)`
+
+```
+rdi = s
+rsi = a1, rdx = a2, rcx = a3, r8 = a4, r9 = a5     (5 variadic args fit in registers)
+a6, a7, a8  -> pushed on the stack by the caller, never in registers
+```
+
+- The first 5 `va_arg` calls read the save area. After the 5th, `gp_offset` is 48, which means "registers used up".
+- The 6th `va_arg` takes the `else` branch: it reads from `overflow_arg_area`, which points into the **caller's stack frame**, directly at `a6`. Then it moves the pointer 8 bytes forward to `a7`, and so on.
+- The overflow area is **not copied**. It's read in place, where the caller put it.
+
+That's why a `va_list` is only valid while the calling function is still alive.
+
+---
+
+## 7. What gets stored: the data itself or its address?
+
+| Argument | What's in the slot |
+|---|---|
+| `int`, `unsigned`, `char` (as int) | The value itself |
+| `char *` (`%s`), `void *` (`%p`), pointer to a struct | The **address**. What it points to is never copied |
+| `double` | The value, in a float register / float slot (not covered in the mandatory part) |
+
+---
+
+## 8. What happens to the registers afterwards
+
+- Registers are not "saved somewhere to be restored". They're just scratch space. After the prologue copied them, the CPU is free to use them for anything.
+- Calling `write(1, s, 1)` puts its own values into `rdi`, `rsi`, `rdx`, so the original ones are gone.
+- That's why `va_arg` reads the **copies in the save area**, never the registers directly.
+
+---
+
+## 9. How is the format string "detected"?
+
+It isn't. `s` is simply the first parameter, so the compiler passes it in `rdi` by position. Your `while (*s)` loop and `if (*s == '%')` are what give it meaning as a format string. The compiler doesn't know or check it.
+
+---
+
+## 10. See it yourself
+
+Write a tiny variadic function in a file `t.c`, then:
+
+```
+cc -S -O0 t.c      # produces t.s
+```
+
+Open `t.s`. Near the top of the variadic function you'll see:
+
+- a `test %al, %al` followed by a jump (the float-register check)
+- a series of `mov` instructions storing `rsi`, `rdx`, `rcx`, `r8`, `r9` into the stack frame
+
+That's the register save area being built. The exact offsets vary between compilers.
+
+---
+
+## One-paragraph summary
+
+The caller puts the first 6 integer/pointer args in `rdi, rsi, rdx, rcx, r8, r9` (extras go on the stack). At the start of `ft_printf`, hidden compiler code copies those registers into a block in its own stack frame (the register save area). `va_start` just fills a 4-field struct (`gp_offset`, `fp_offset`, `overflow_arg_area`, `reg_save_area`) with the starting positions, skipping the named params. Each `va_arg` reads the next 8-byte slot, either from the save area or, once those run out, from the caller's stack, and moves its position forward. Integers are stored as values, pointers as addresses.
+
+
+
+Here is a concise, drop-in section for your notes covering the full 16-register picture and the only two extra registers you actually need to know.
+
+Bonus Section for Your Notes: The Full 16-GPR Picture
+
+An x86-64 CPU actually has 16 General Purpose Registers (GPRs) inside the processor chip—not just 6. All 16 sit in the same hardware register file, but the System V ABI divides them into different jobs:
+• 6 Argument GPRs (rdi, rsi, rdx, rcx, r8, r9): Carry the first 6 integer/pointer arguments into a function. Only these 6 are copied into the Register Save Area.
+• 10 Other GPRs: Managed automatically by the compiler while your code runs. Out of those 10, only 2 matter for your understanding and debugging:
+
+Register	Role	Why It Matters in ft_printf & Debugging
+rax	Return Value & Syscall Register	• Entry (al, lowest 8 bits): Empty before a call, so the caller slips the float register count (0) into al without wasting any of the 6 argument registers.
+• During execution: Holds the write syscall number.
+• Exit: Holds ft_printf's final return value (total printed characters) when return (count); executes.
+rsp	Stack Pointer	• Points to the current top edge of your stack frame.
+• Moves down to make room for the Register Save Area and local variables, and moves back up when ft_printf finishes (if infinite recursion ever happens in ft_putnbr, rsp overflows).
+
+(The remaining 8 GPRs—rbp, rbx, r10–r15—are just compiler scratchpads for local variables, math, and loop counters; you never need to touch or track them.)
+Your ft_printf notes are completely solid now—let me know if you want to test any edge cases or review your code structure next!
+
+
+All 16 General Purpose Registers on x86-64
+
+
+Role / Job Description	Registers	Count	What They Do
+Argument Passing	rdi, rsi, rdx, rcx, r8, r9	6	Carry the first 6 arguments into a function (these are the 6 saved in the Register Save Area).
+Return Value & Syscalls	rax	1	Carries the return value out of a function (and its bottom byte al holds the float count on entry).
+Stack Management	rsp, rbp	2	Keep track of the top and bottom of your current stack frame.
+General Scratch / Variables	rbx, r10, r11, r12, r13, r14, r15	7	Hold local variables, loop counters, and temporary math results while your code runs.
+
+
+63                              31              15      7       0  (bit index)
+┌───────────────────────────────┬───────────────┬───────┬───────┐
+│                               │               │  ah   │  al   │
+│                               │               ├───────┴───────┤
+│                               │               │      ax       │
+│                               ├───────────────┴───────────────┤
+│                               │              eax              │
+├───────────────────────────────┴───────────────────────────────┤
+│                              rax                              │
+└───────────────────────────────────────────────────────────────┘

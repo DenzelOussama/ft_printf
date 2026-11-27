@@ -1,0 +1,134 @@
+HIGH ADDRESSES
+	
+test2("zakariae", "1", "2", "3", "4", "5", "6", "7", "8");
+
+┌──────────────────────────────────────────────────────────────┐
+│ main's locals                                                │
+├──────────────────────────────────────────────────────────────┤
+│ 0x7ffe1048   0x55555555601e ──► "8"      (3rd stack arg)     │
+│ 0x7ffe1040   0x55555555601c ──► "7"      (2nd stack arg)     │
+│ 0x7ffe1038   0x55555555601a ──► "6"      (1st stack arg)     │ ◄── overflow_arg_area
+├──────────────────────────────────────────────────────────────┤
+│ 0x7ffe1030   return address (to main)                        │
+│ 0x7ffe1028   saved rbp                                       │ ◄── rbp
+╞═══════════════ test2's frame starts here ════════════════════╡
+│ ap (va_list, 24 bytes)                                       │
+│     gp_offset         = 8                                    │
+│     fp_offset         = 48                                   │
+│     overflow_arg_area = 0x7ffe1038   (points UP to "6" slot) │
+│     reg_save_area     = 0x7ffe0f40   (points DOWN to +0)     │
+├──────────────────────────────────────────────────────────────┤
+│ local copy of c = 0x555555556043 ──► "zakariae"              │
+│ (a normal local, NOT in the register save area)              │
+├──────────────────────────────────────────────────────────────┤
+│ REGISTER SAVE AREA (176 bytes)                               │
+│   +160 … +48   xmm7 … xmm0                                   │
+│   +40  0x7ffe0f68   0x555555556018 ──► "5"     (from r9)     │
+│   +32  0x7ffe0f60   0x555555556016 ──► "4"     (from r8)     │
+│   +24  0x7ffe0f58   0x555555556014 ──► "3"     (from rcx)    │
+│   +16  0x7ffe0f50   0x555555556012 ──► "2"     (from rdx)    │
+│   +8   0x7ffe0f48   0x555555556010 ──► "1"     (from rsi)    │ ◄── gp_offset = 8 * named int parameters
+│   +0   0x7ffe0f40   (rdi slot, unused)                       │ ◄── reg_save_area
+└──────────────────────────────────────────────────────────────┘
+
+reg_save_area + gp_offset
+gp_offset += 8;
+
+LOW ADDRESSES  (rsp)
+
+#define yes 5*5*5
+
+int main()
+{
+    test2("zakariae", "1", "2", "3", "4", "5", "6", "7", "8");
+
+    printf("%d",87);   
+}
+
+
+
+HIGH ADDRESSES
+┌────────────────────────────────────────────────────────────────────┐
+│ KERNEL SPACE  (0xffff8000... and up)  not accessible to your code  │
+╞════════════════════════════════════════════════════════════════════╡
+│ STACK  (0x7ffe....)                          grows DOWN ↓          │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ env strings, argv strings, auxv, envp[], argv[], argc        │  │
+│  ├──────────────────────────────────────────────────────────────┤  │
+│  │ __libc_start_main frames (calls main)                        │  │
+│  ├──────────────────────────────────────────────────────────────┤  │
+│  │ main's frame                                                 │  │
+│  │ 0x7ffe1048  0x55555555601e <-> "8"   (3rd stack arg)         │  │
+│  │ 0x7ffe1040  0x55555555601c ──► "7"   (2nd stack arg)         │  │
+│  │ 0x7ffe1038  0x55555555601a ──► "6"   (1st stack arg)  ◄──┐   │  │
+│  ├──────────────────────────────────────────────────────────┼───┤  │
+│  │ 0x7ffe1030  return address (back to main)                │   │  │
+│  │ 0x7ffe1028  saved rbp                                    │   │  │
+│  ├──────────────── test2's frame ───────────────────────────┼───┤  │
+│  │ ap (va_list, 24 bytes)                                   │   │  │
+│  │   gp_offset = 8 → 16 → ... → 48                          │   │  │
+│  │   fp_offset = 48                                         │   │  │
+│  │   overflow_arg_area = 0x7ffe1038 ────────────────────────┘   │  │
+│  │   reg_save_area     = 0x7ffe0f40 ──────────────────┐         │  │
+│  │ i = 0..8                                           │         │  │
+│  │ res (char *)                                       │         │  │
+│  │ c   = 0x555555556043 ──► "zakariae" (in .rodata)   │         │  │
+│  ├────────────────────────────────────────────────────┼─────────┤  │
+│  │ REGISTER SAVE AREA (176 bytes)                     │         │  │
+│  │ +160..+48  xmm7..xmm0                              │         │  │
+│  │ +40  0x7ffe0f68  → "5"  (r9)                       │         │  │
+│  │ +32  0x7ffe0f60  → "4"  (r8)                       │         │  │
+│  │ +24  0x7ffe0f58  → "3"  (rcx)                      │         │  │
+│  │ +16  0x7ffe0f50  → "2"  (rdx)                      │         │  │
+│  │ +8   0x7ffe0f48  → "1"  (rsi)   ◄ gp_offset starts │         │  │
+│  │ +0   0x7ffe0f40  (rdi slot, unused) ◄──────────────┘         │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  printf's own frames get pushed below this when called             │
+│                              ↓ (rsp)                               │
+│                                                                    │
+│              ... large unused gap (stack can grow) ...             │
+╞════════════════════════════════════════════════════════════════════╡
+│ MEMORY-MAPPED REGION  (0x7fxx.... shared libraries)                │
+│   ld-linux-x86-64.so  (dynamic loader)                             │
+│   libc.so.6           (printf lives here: code + its own data)     │
+│   [vdso], [vvar]                                                   │
+│   (also where big malloc calls and mmap go)                        │
+╞════════════════════════════════════════════════════════════════════╡
+│              ... large unused gap (heap can grow) ...              │
+│                              ↑                                     │
+│ HEAP  (0x5555.... after .bss)                grows UP ↑            │
+│   your code never calls malloc, but printf does it for you:        │
+│   glibc allocates the stdout buffer (about 1024 or 4096 bytes)     │
+│   on the first printf                                              │
+╞════════════════════════════════════════════════════════════════════╡
+│ .BSS    uninitialized globals/statics (zeroed)                     │
+│   → EMPTY in your program (no globals)                             │
+├────────────────────────────────────────────────────────────────────┤
+│ .DATA   initialized globals/statics (read/write)                   │
+│   → EMPTY in your program (no globals)                             │
+├────────────────────────────────────────────────────────────────────┤
+│ .RODATA  read-only data (string literals)                          │
+│   0x555555556010  "1"                                              │
+│   0x555555556012  "2"                                              │
+│   0x555555556014  "3"                                              │
+│   0x555555556016  "4"                                              │
+│   0x555555556018  "5"                                              │
+│   0x55555555601a  "6"                                              │
+│   0x55555555601c  "7"                                              │
+│   0x55555555601e  "8"                                              │
+│   0x555555556043  "zakariae"                                       │
+│   ......          "res from reg save era : %s\n"                   │
+│   ......          "res from stack : %s\n"                          │
+├────────────────────────────────────────────────────────────────────┤
+│ .TEXT   machine code (read + execute)                              │
+│   0x555555555129  main                                             │
+│   0x555555555171  test2   ← your gdb breakpoint was here           │
+│   (+ _start, PLT stubs for printf, etc.)                           │
+├────────────────────────────────────────────────────────────────────┤
+│ ELF headers                                                        │
+│   0x555555554000  base address of your binary (PIE)                │
+╞════════════════════════════════════════════════════════════════════╡
+│ NULL page (0x0 ... 0xfff)  unmapped, so NULL dereference segfaults │
+└────────────────────────────────────────────────────────────────────┘
+LOW ADDRESSES
